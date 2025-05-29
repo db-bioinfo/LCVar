@@ -988,7 +988,12 @@ def check_PM2(line,Freqs_flgs,Allels_flgs,Funcanno_flgs,mim2gene_dict,mim2gene_d
     valid_frequencies = []
     
     # Check each population database with enhanced QC
+    # Check each population database with enhanced QC
     for key in Freqs_flgs.keys():
+        # EXCLUDE ESP6500 from PM2 evaluation (outdated database per ACMG/ClinGen guidance)
+        if key == 'esp6500siv2_all':
+            continue
+            
         if cls[Freqs_flgs[key]] != '.':
             try:
                 freq = float(cls[Freqs_flgs[key]])
@@ -1303,6 +1308,10 @@ def check_BA1(line,Freqs_flgs,Allels_flgs):
     
     # Check each major population
     for key in Freqs_flgs.keys():
+        # EXCLUDE ESP6500 from BA1 evaluation (outdated database per ACMG/ClinGen guidance)
+        if key == 'esp6500siv2_all':
+            continue
+            
         if cls[Freqs_flgs[key]] != '.':
             try:
                 freq = float(cls[Freqs_flgs[key]])
@@ -1335,6 +1344,10 @@ def check_BS1(line,Freqs_flgs,Allels_flgs):
     # Check against multiple populations
     frequencies = []
     for key in Freqs_flgs.keys():
+        # EXCLUDE ESP6500 from BS1 evaluation (outdated database per ACMG/ClinGen guidance)
+        if key == 'esp6500siv2_all':
+            continue
+            
         if cls[Freqs_flgs[key]] != '.':
             try:
                 freq = float(cls[Freqs_flgs[key]])
