@@ -638,15 +638,15 @@ def classfy(PVS1,PS,PM,PP,BA1,BS,BP,Allels_flgs,cls):
     # Calculate pathogenic evidence points
     pathogenic_points = 0
     pathogenic_points += PVS1 * 8  # Very Strong = 8 points
-    pathogenic_points += sum(PS) * 4  # Strong = 4 points (PS always returns 0 or 1)
-    pathogenic_points += sum(PM)      # PM can return variable points - don't multiply!
-    pathogenic_points += sum(PP)      # PP can return variable points - don't multiply!
+    pathogenic_points += sum(PS) * 4  # Strong = 4 points  
+    pathogenic_points += sum(PM) * 2  # Moderate = 2 points
+    pathogenic_points += sum(PP) * 1  # Supporting = 1 point
     
     # Calculate benign evidence points
     benign_points = 0
     benign_points += BA1 * 8  # Stand-alone = 8 points
-    benign_points += sum(BS) * 4  # Strong = 4 points (BS always returns 0 or 1)
-    benign_points += sum(BP)      # BP can return variable points - don't multiply!
+    benign_points += sum(BS) * 4  # Strong = 4 points
+    benign_points += sum(BP) * 1  # Supporting = 1 point
     
     # Calculate total score
     total_score = pathogenic_points - benign_points
@@ -697,101 +697,102 @@ def classfy(PVS1,PS,PM,PP,BA1,BS,BP,Allels_flgs,cls):
 
 def check_PVS1(line,Funcanno_flgs,Allels_flgs,lof_genes_dict):
     '''
-    PVS1: Enhanced LOF variant assessment following 2018 ClinGen SVI recommendations
-    Incorporates SnpEff LOF annotations and NMD predictions
+    Null variant in a gene where LOF is a known mechanism of disease - UPDATED
+    Enhanced with NMD, last exon, and transcript-specific considerations
     '''
-    cls = line.split('\t')
-    PVS1 = 0
+    cls=line.split('\t')
+    PVS1=0
+    PVS_basic=0
+    PVS_lof_gene=0
+    PVS_transcript_ok=0
     
-    # Parse SnpEff LOF annotation from ALL columns (not just first Otherinfo)
-    snpeff_lof_genes = set()
-    nmd_genes = set()
+    # Enhanced variant type detection
+    funcs_lof = ["nonsense", "frameshift", "splic", "stopgain", "startloss"]
+    funcs_exclude = ["nonframe"]  # Exclude non-frameshift
     
-    try:
-        import re
-        # Search ALL columns for LOF data (LOF could be in any Otherinfo column)
-        for col_value in cls:
-            if 'LOF=' in str(col_value):
-                # Extract LOF annotations: LOF=(GENE|GENE|1|1.00)
-                lof_matches = re.findall(r'LOF=\(([^|]+)\|[^|]+\|[^|]+\|([^)]+)\)', col_value)
-                for gene, confidence in lof_matches:
-                    if float(confidence) >= 0.9:  # High confidence LOF
-                        snpeff_lof_genes.add(gene)
-                
-                # Extract NMD annotations: NMD=(GENE|GENE|1|1.00)
-                nmd_matches = re.findall(r'NMD=\(([^|]+)\|[^|]+\|[^|]+\|([^)]+)\)', col_value)
-                for gene, confidence in nmd_matches:
-                    if float(confidence) >= 0.9:
-                        nmd_genes.add(gene)
-    except:
-        pass
-    
-    # Check variant type from functional annotation
     line_tmp = cls[Funcanno_flgs['Func.refGene']] + " " + cls[Funcanno_flgs['ExonicFunc.refGene']]
     
-    # Enhanced LOF variant type detection per ClinGen SVI 2018
-    lof_evidence = 0
-    variant_gene = cls[Funcanno_flgs['Gene']]
+    # Check for loss-of-function variant types
+    for fc in funcs_lof:
+        if line_tmp.find(fc) >= 0 and line_tmp.find(funcs_exclude[0]) < 0:
+            PVS_basic = 1
+            break
     
-    # Check if gene has LOF mechanism of disease
-    gene_lof_mechanism = 0
+    # Enhanced LOF gene mechanism check
     try:
-        if lof_genes_dict.get(variant_gene) == '1':
-            gene_lof_mechanism = 1
+        if lof_genes_dict.get(cls[Funcanno_flgs['Gene']]) == '1':
+            PVS_lof_gene = 1
     except:
         pass
     
-    # 1. SnpEff high-confidence LOF annotation
-    if variant_gene in snpeff_lof_genes:
-        lof_evidence = 1
-        
-        # Apply ClinGen SVI decision tree
-        if gene_lof_mechanism:
-            # Check for NMD prediction
-            if variant_gene in nmd_genes:
-                PVS1 = 1  # Very Strong
+    # Enhanced splicing impact verification
+    splice_confirmed = 0
+    if line_tmp.find("splic") >= 0:
+        try:
+            ada_score = cls[Funcanno_flgs.get('dbscSNV_ADA_SCORE', -1)]
+            rf_score = cls[Funcanno_flgs.get('dbscSNV_RF_SCORE', -1)]
+            
+            if ada_score != '.' and rf_score != '.':
+                ada_val = float(ada_score)
+                rf_val = float(rf_score)
+                # More stringent splicing confirmation
+                if ada_val >= 0.958 or rf_val >= 0.584:
+                    splice_confirmed = 1
             else:
-                # Last exon or NMD-escape considerations
-                try:
-                    # Check if stopgain/nonsense in last exon
-                    if "stopgain" in line_tmp.lower() or "nonsense" in line_tmp.lower():
-                        # More conservative for last exon variants
-                        PVS1 = 1  # Still Very Strong but flagged for review
-                    else:
-                        PVS1 = 1  # Very Strong
-                except:
-                    PVS1 = 1
+                # If no splicing scores, be more conservative
+                if "canonical" in line_tmp.lower() or "essential" in line_tmp.lower():
+                    splice_confirmed = 1
+        except:
+            # Default to confirmed for canonical splice sites
+            splice_confirmed = 1
+    else:
+        # Non-splicing variants automatically confirmed
+        splice_confirmed = 1
     
-    # 2. Traditional variant type checking as backup
-    if not lof_evidence and gene_lof_mechanism:
-        funcs_lof = ["nonsense", "frameshift", "stopgain", "startloss"]
-        splice_lof = ["splice", "splicing"]
+    # Enhanced transcript and exon analysis
+    transcript_appropriate = 1  # Assume appropriate unless proven otherwise
+    
+    try:
+        # Analyze transcript information
+        aachange_info = cls[Funcanno_flgs.get('AAChange.knownGene', '')]
         
-        for fc in funcs_lof:
-            if fc in line_tmp.lower():
-                lof_evidence = 1
-                PVS1 = 1
-                break
-        
-        # Enhanced splice site assessment
-        if not lof_evidence:
-            for splice_type in splice_lof:
-                if splice_type in line_tmp.lower():
-                    # Check splice prediction scores
+        if aachange_info and aachange_info != '.':
+            # Parse transcript information
+            for transcript_info in aachange_info.split(','):
+                parts = transcript_info.split(':')
+                if len(parts) >= 3:
+                    transcript_id = parts[1]
+                    exon_info = parts[2]
+                    
+                    # Check if this is the last exon
                     try:
-                        ada_score = cls[Funcanno_flgs.get('dbscSNV_ADA_SCORE', -1)]
-                        rf_score = cls[Funcanno_flgs.get('dbscSNV_RF_SCORE', -1)]
-                        
-                        if ada_score != '.' and rf_score != '.':
-                            ada_val = float(ada_score)
-                            rf_val = float(rf_score)
-                            # High confidence splice disruption
-                            if ada_val >= 0.958 or rf_val >= 0.584:
-                                PVS1 = 1
+                        if transcript_id in knownGeneCanonical_dict:
+                            canonical_exons = knownGeneCanonical_dict[transcript_id]
+                            if exon_info == f"exon{canonical_exons}":
+                                # Last exon - check distance from 3' end
+                                try:
+                                    gene_end = float(knownGeneCanonical_ed_dict.get(transcript_id, 0))
+                                    variant_pos = float(cls[Allels_flgs['Start']])
+                                    
+                                    # If variant is within 50bp of 3' end, may escape NMD
+                                    if abs(gene_end - variant_pos) < 50:
+                                        # Reduce confidence but don't eliminate
+                                        transcript_appropriate = 0.5
+                                except:
+                                    pass
                     except:
-                        # Default for canonical splice sites
-                        if "canonical" in line_tmp.lower():
-                            PVS1 = 1
+                        pass
+    except:
+        pass
+    
+    # Final PVS1 determination with enhanced logic
+    if PVS_basic and PVS_lof_gene and splice_confirmed:
+        if transcript_appropriate == 1:
+            PVS1 = 1  # Full PVS1
+        elif transcript_appropriate == 0.5:
+            # In a real implementation, we might return strength information
+            # For now, still trigger but note it might be reduced strength
+            PVS1 = 1
     
     return PVS1
 
@@ -1280,62 +1281,20 @@ def check_PP4(line,Funcanno_flgs,Allels_flgs):
 
 def check_PP5(line,Funcanno_flgs,Allels_flgs):
     '''
-    ENHANCED PP5: Reputable source recently reports variant as pathogenic
-    Implements ClinGen SVI 2023 recommendations for evidence strength scaling
-    Based on ClinVar review status and clinical significance
+    Reputable source recently reports variant as pathogenic, but the evidence is not available to the laboratory
+    to perform an independent evaluation
     '''
-    PP5 = 0
-    cls = line.split('\t')
-    
-    # Get ClinVar fields - handle missing indices gracefully
-    try:
-        clnsig = cls[Funcanno_flgs.get('CLINSIG', -1)]
-        clnrevstat = cls[Funcanno_flgs.get('CLNREVSTAT', -1)]
-    except (IndexError, KeyError):
-        return 0
-    
-    # Skip if either field is missing or empty
-    if clnsig == '.' or clnrevstat == '.' or clnsig == '' or clnrevstat == '':
-        return 0
-    
-    # Check for pathogenic classification
-    # Handle all pathogenic variants: Pathogenic, Likely_pathogenic, Pathogenic/Likely_pathogenic
-    pathogenic_terms = ['Pathogenic', 'pathogenic']
-    is_pathogenic = any(term in clnsig for term in pathogenic_terms)
-    
-    # Exclude conflicting classifications
-    conflicting_terms = ['conflicting', 'Conflicting']
-    has_conflicts = any(term in clnsig or term in clnrevstat for term in conflicting_terms)
-    
-    if is_pathogenic and not has_conflicts:
-        # Scale evidence strength based on review status per ClinGen SVI guidelines
-        
-        # Very Strong Evidence (8 points): Expert panel or practice guideline
-        if ('reviewed_by_expert_panel' in clnrevstat or 
-            'practice_guideline' in clnrevstat):
-            PP5 = 8
-            
-        # Strong Evidence (4 points): Multiple submitters, no conflicts
-        elif ('multiple_submitters' in clnrevstat and 
-              'no_conflicts' in clnrevstat and 
-              'criteria_provided' in clnrevstat):
-            PP5 = 4
-            
-        # Supporting Evidence (1 point): Single submitter with criteria
-        elif ('criteria_provided' in clnrevstat and 
-              'single_submitter' in clnrevstat):
-            PP5 = 1
-            
-        # No Evidence: Insufficient review criteria
-        elif ('no_assertion_criteria_provided' in clnrevstat or
-              'no_classification' in clnrevstat):
-            PP5 = 0
-            
-        # Default Supporting for other cases with pathogenic classification
-        else:
-            PP5 = 1
-    
-    return PP5
+    PP5=0
+    cls=line.split('\t')
+
+    line_tmp2=cls[Funcanno_flgs['CLINSIG']]
+    if line_tmp2 != '.':
+        cls3=line_tmp2.split(';')
+        clinvar_bp=cls3[0]
+        if clinvar_bp.find("ikely pathogenic")>=0 or clinvar_bp.find("athogenic")>=0:
+            if clinvar_bp.find("onflicting")<0:
+                PP5=1
+    return(PP5)
 
 def check_BA1(line,Freqs_flgs,Allels_flgs):
     '''
@@ -1797,19 +1756,10 @@ def assign(BP,line,Freqs_flgs,Funcanno_flgs,Allels_flgs):
     # CRITICAL FIX: Apply rule conflict resolution following ACMG/VarSome guidelines
     
     # 1. PVS1 conflicts: If PVS1 is triggered, disable conflicting benign rules
-    # 1. PVS1 conflicts: Enhanced conflict resolution per ClinGen SVI 2018
     if PVS1 > 0:
         BP[3] = 0  # Disable BP4 (computational evidence suggests benign)
-        # Note: Do NOT disable PP3 for splicing variants per ClinGen SVI Splicing Subgroup 2023
-        # Only disable PP3 for canonical splice sites already captured by PVS1
-        try:
-            line_tmp = cls[Funcanno_flgs['Func.refGene']] + " " + cls[Funcanno_flgs['ExonicFunc.refGene']]
-            if "canonical" in line_tmp.lower() and ("splice" in line_tmp.lower() or "splicing" in line_tmp.lower()):
-                PP[2] = 0  # Disable PP3 for canonical splice sites only
-        except:
-            pass
-        # Disable PM4 to avoid double-counting with PVS1
-        PM[3] = 0
+        PP[2] = 0  # Disable PP3 to avoid double-counting (PVS1 already covers LOF impact)
+        PM[3] = 0  # Disable PM4 to avoid double-counting (PVS1 already covers LOF impact)
         
     # 2. PM1 conflicts: If PM1 is triggered, limit PP3 strength and disable BP3
     if PM[0] > 0:
@@ -1946,7 +1896,7 @@ def my_inter_var(annovar_outfile):
     newoutfile2=annovar_outfile+".intervar"
 
     Freqs_flgs={'1000g2015aug_all':0,'esp6500siv2_all':0,'gnomAD_genome_ALL':0,'gnomAD_genome_AFR':0,'gnomAD_genome_AMR':0,'gnomAD_genome_EAS':0,'gnomAD_genome_FIN':0,'gnomAD_genome_NFE':0,'gnomAD_genome_OTH':0,'gnomAD_genome_ASJ':0}
-    Funcanno_flgs={'Func.refGene':0,'ExonicFunc.refGene':0,'AAChange.refGene':0,'Gene':0,'Gene damage prediction (all disease-causing genes)':0,'CLNDBN':0,'CLNACC':0,'CLNDSDB':0,'dbscSNV_ADA_SCORE':0,'dbscSNV_RF_SCORE':0,'GERP++_RS':0,'LoFtool_percentile':0,'Interpro_domain':0,'rmsk':0,'SIFT_score':0,'phyloP46way_placental':0,'Gene.ensGene':0,'CLINSIG':0,'CLNREVSTAT':0,'CADD_raw':0,'CADD_phred':0,'avsnp151':0,'AAChange.ensGene':0,'AAChange.knownGene':0,'MetaSVM_score':0,'MetaRNN_score':0,'REVEL_score':0,'BayesDel_addAF_score':0,'AlphaMissense_score':0,'phyloP100way_vertebrate':0,'Otherinfo':0}
+    Funcanno_flgs={'Func.refGene':0,'ExonicFunc.refGene':0,'AAChange.refGene':0,'Gene':0,'Gene damage prediction (all disease-causing genes)':0,'CLNDBN':0,'CLNACC':0,'CLNDSDB':0,'dbscSNV_ADA_SCORE':0,'dbscSNV_RF_SCORE':0,'GERP++_RS':0,'LoFtool_percentile':0,'Interpro_domain':0,'rmsk':0,'SIFT_score':0,'phyloP46way_placental':0,'Gene.ensGene':0,'CLINSIG':0,'CADD_raw':0,'CADD_phred':0,'avsnp151':0,'AAChange.ensGene':0,'AAChange.knownGene':0,'MetaSVM_score':0,'MetaRNN_score':0,'REVEL_score':0,'BayesDel_addAF_score':0,'AlphaMissense_score':0,'phyloP100way_vertebrate':0,'Otherinfo':0}
     Allels_flgs={'Chr':0,'Start':0,'End':0,'Ref':0,'Alt':0}
 # gnomAD_genome_ALL esp6500siv2_all   1000g2015aug_all  SIFT_score    CADD_raw    CADD_phred  GERP++_RS   phyloP46way_placental  dbscSNV_ADA_SCORE   dbscSNV_RF_SCORE   Interpro_domain
 
@@ -1957,9 +1907,9 @@ def my_inter_var(annovar_outfile):
         line_sum=0;
         print("Notice: Begin the variants interpretation by InterVar ")
         if re.findall('true',paras['otherinfo'], flags=re.IGNORECASE)  :
-            fw.write("#%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tclinvar: %s \tclinvar_review: %s \t InterVar: %s \t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % ("Chr","Start","End","Ref","Alt","Ref.Gene","Func.refGene","ExonicFunc.refGene", "Gene.ensGene","avsnp151","AAChange.ensGene","AAChange.refGene","Clinvar","ClinVar_Review","InterVar and Evidence","Freq_gnomAD_genome_ALL", "Freq_esp6500siv2_all","Freq_1000g2015aug_all", "CADD_raw","CADD_phred","SIFT_score","GERP++_RS","phyloP46way_placental","dbscSNV_ADA_SCORE", "dbscSNV_RF_SCORE", "Interpro_domain","AAChange.knownGene","rmsk","MetaSVM_score","Freq_gnomAD_genome_POPs","OMIM","Phenotype_MIM","OrphaNumber","Orpha","Otherinfo"  ))
+            fw.write("#%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tclinvar: %s \t InterVar: %s \t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % ("Chr","Start","End","Ref","Alt","Ref.Gene","Func.refGene","ExonicFunc.refGene", "Gene.ensGene","avsnp151","AAChange.ensGene","AAChange.refGene","Clinvar","InterVar and Evidence","Freq_gnomAD_genome_ALL", "Freq_esp6500siv2_all","Freq_1000g2015aug_all", "CADD_raw","CADD_phred","SIFT_score","GERP++_RS","phyloP46way_placental","dbscSNV_ADA_SCORE", "dbscSNV_RF_SCORE", "Interpro_domain","AAChange.knownGene","rmsk","MetaSVM_score","Freq_gnomAD_genome_POPs","OMIM","Phenotype_MIM","OrphaNumber","Orpha","Otherinfo"  ))
         else:
-            fw.write("#%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tclinvar: %s \tclinvar_review: %s \t InterVar: %s \t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % ("Chr","Start","End","Ref","Alt","Ref.Gene","Func.refGene","ExonicFunc.refGene", "Gene.ensGene","avsnp151","AAChange.ensGene","AAChange.refGene","Clinvar","ClinVar_Review","InterVar and Evidence","Freq_gnomAD_genome_ALL", "Freq_esp6500siv2_all","Freq_1000g2015aug_all", "CADD_raw","CADD_phred","SIFT_score","GERP++_RS","phyloP46way_placental","dbscSNV_ADA_SCORE", "dbscSNV_RF_SCORE", "Interpro_domain","AAChange.knownGene","rmsk","MetaSVM_score","Freq_gnomAD_genome_POPs","OMIM","Phenotype_MIM","OrphaNumber","Orpha"  ))
+            fw.write("#%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tclinvar: %s \t InterVar: %s \t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % ("Chr","Start","End","Ref","Alt","Ref.Gene","Func.refGene","ExonicFunc.refGene", "Gene.ensGene","avsnp151","AAChange.ensGene","AAChange.refGene","Clinvar","InterVar and Evidence","Freq_gnomAD_genome_ALL", "Freq_esp6500siv2_all","Freq_1000g2015aug_all", "CADD_raw","CADD_phred","SIFT_score","GERP++_RS","phyloP46way_placental","dbscSNV_ADA_SCORE", "dbscSNV_RF_SCORE", "Interpro_domain","AAChange.knownGene","rmsk","MetaSVM_score","Freq_gnomAD_genome_POPs","OMIM","Phenotype_MIM","OrphaNumber","Orpha"  ))
 
         for line in strs.split('\n'):
             BP="UNK" # the inter of pathogenetic/benign
@@ -2002,11 +1952,9 @@ def my_inter_var(annovar_outfile):
 
                 if re.findall('true',paras['otherinfo'], flags=re.IGNORECASE)  :
                     cls[Funcanno_flgs['Otherinfo']]=cls[Funcanno_flgs['Otherinfo']].replace('\t', ';')
-                    clnrevstat_output = cls[Funcanno_flgs.get('CLNREVSTAT', len(cls)-1)] if 'CLNREVSTAT' in Funcanno_flgs else "."
-                    fw.write("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tclinvar: %s \tclinvar_review: %s \t InterVar: %s \t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % (cls[Allels_flgs['Chr']],cls[Allels_flgs['Start']],cls[Allels_flgs['End']],cls[Allels_flgs['Ref']],cls[Allels_flgs['Alt']],cls[Funcanno_flgs['Gene']],cls[Funcanno_flgs['Func.refGene']],cls[Funcanno_flgs['ExonicFunc.refGene']], cls[Funcanno_flgs['Gene.ensGene']],cls[Funcanno_flgs['avsnp151']],cls[Funcanno_flgs['AAChange.ensGene']],cls[Funcanno_flgs['AAChange.refGene']],clinvar_bp,clnrevstat_output,intervar_bp,cls[Freqs_flgs['gnomAD_genome_ALL']], cls[Freqs_flgs['esp6500siv2_all']], cls[Freqs_flgs['1000g2015aug_all']], cls[Funcanno_flgs['CADD_raw']],cls[Funcanno_flgs['CADD_phred']],cls[Funcanno_flgs['SIFT_score']],  cls[Funcanno_flgs['GERP++_RS']],".", cls[Funcanno_flgs['dbscSNV_ADA_SCORE']], cls[Funcanno_flgs['dbscSNV_RF_SCORE']], cls[Funcanno_flgs['Interpro_domain']],cls[Funcanno_flgs['AAChange.knownGene']],cls[Funcanno_flgs['rmsk']],cls[Funcanno_flgs['MetaSVM_score']],Freq_gnomAD_genome_POPs,OMIM,Pheno_MIM,orpha,orpha_details,cls[Funcanno_flgs['Otherinfo']]   ))
+                    fw.write("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tclinvar: %s \t InterVar: %s \t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % (cls[Allels_flgs['Chr']],cls[Allels_flgs['Start']],cls[Allels_flgs['End']],cls[Allels_flgs['Ref']],cls[Allels_flgs['Alt']],cls[Funcanno_flgs['Gene']],cls[Funcanno_flgs['Func.refGene']],cls[Funcanno_flgs['ExonicFunc.refGene']], cls[Funcanno_flgs['Gene.ensGene']],cls[Funcanno_flgs['avsnp151']],cls[Funcanno_flgs['AAChange.ensGene']],cls[Funcanno_flgs['AAChange.refGene']],clinvar_bp,intervar_bp,cls[Freqs_flgs['gnomAD_genome_ALL']], cls[Freqs_flgs['esp6500siv2_all']], cls[Freqs_flgs['1000g2015aug_all']], cls[Funcanno_flgs['CADD_raw']],cls[Funcanno_flgs['CADD_phred']],cls[Funcanno_flgs['SIFT_score']],  cls[Funcanno_flgs['GERP++_RS']],".", cls[Funcanno_flgs['dbscSNV_ADA_SCORE']], cls[Funcanno_flgs['dbscSNV_RF_SCORE']], cls[Funcanno_flgs['Interpro_domain']],cls[Funcanno_flgs['AAChange.knownGene']],cls[Funcanno_flgs['rmsk']],cls[Funcanno_flgs['MetaSVM_score']],Freq_gnomAD_genome_POPs,OMIM,Pheno_MIM,orpha,orpha_details,cls[Funcanno_flgs['Otherinfo']]   ))
                 else:
-                    clnrevstat_output = cls[Funcanno_flgs.get('CLNREVSTAT', len(cls)-1)] if 'CLNREVSTAT' in Funcanno_flgs else "."
-                    fw.write("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tclinvar: %s \tclinvar_review: %s \t InterVar: %s \t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % (cls[Allels_flgs['Chr']],cls[Allels_flgs['Start']],cls[Allels_flgs['End']],cls[Allels_flgs['Ref']],cls[Allels_flgs['Alt']],cls[Funcanno_flgs['Gene']],cls[Funcanno_flgs['Func.refGene']],cls[Funcanno_flgs['ExonicFunc.refGene']], cls[Funcanno_flgs['Gene.ensGene']],cls[Funcanno_flgs['avsnp151']],cls[Funcanno_flgs['AAChange.ensGene']],cls[Funcanno_flgs['AAChange.refGene']],clinvar_bp,clnrevstat_output,intervar_bp,cls[Freqs_flgs['gnomAD_genome_ALL']], cls[Freqs_flgs['esp6500siv2_all']], cls[Freqs_flgs['1000g2015aug_all']], cls[Funcanno_flgs['CADD_raw']],cls[Funcanno_flgs['CADD_phred']],cls[Funcanno_flgs['SIFT_score']],  cls[Funcanno_flgs['GERP++_RS']],".", cls[Funcanno_flgs['dbscSNV_ADA_SCORE']], cls[Funcanno_flgs['dbscSNV_RF_SCORE']], cls[Funcanno_flgs['Interpro_domain']],cls[Funcanno_flgs['AAChange.knownGene']],cls[Funcanno_flgs['rmsk']],cls[Funcanno_flgs['MetaSVM_score']],Freq_gnomAD_genome_POPs,OMIM,Pheno_MIM,orpha,orpha_details  ))
+                    fw.write("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tclinvar: %s \t InterVar: %s \t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % (cls[Allels_flgs['Chr']],cls[Allels_flgs['Start']],cls[Allels_flgs['End']],cls[Allels_flgs['Ref']],cls[Allels_flgs['Alt']],cls[Funcanno_flgs['Gene']],cls[Funcanno_flgs['Func.refGene']],cls[Funcanno_flgs['ExonicFunc.refGene']], cls[Funcanno_flgs['Gene.ensGene']],cls[Funcanno_flgs['avsnp151']],cls[Funcanno_flgs['AAChange.ensGene']],cls[Funcanno_flgs['AAChange.refGene']],clinvar_bp,intervar_bp,cls[Freqs_flgs['gnomAD_genome_ALL']], cls[Freqs_flgs['esp6500siv2_all']], cls[Freqs_flgs['1000g2015aug_all']], cls[Funcanno_flgs['CADD_raw']],cls[Funcanno_flgs['CADD_phred']],cls[Funcanno_flgs['SIFT_score']],  cls[Funcanno_flgs['GERP++_RS']],".", cls[Funcanno_flgs['dbscSNV_ADA_SCORE']], cls[Funcanno_flgs['dbscSNV_RF_SCORE']], cls[Funcanno_flgs['Interpro_domain']],cls[Funcanno_flgs['AAChange.knownGene']],cls[Funcanno_flgs['rmsk']],cls[Funcanno_flgs['MetaSVM_score']],Freq_gnomAD_genome_POPs,OMIM,Pheno_MIM,orpha,orpha_details  ))
 
                 #print("%s\t%s %s" % (line,clinvar_bp,intervar_bp))
 
