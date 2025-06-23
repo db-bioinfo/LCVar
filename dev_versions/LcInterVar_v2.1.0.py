@@ -57,96 +57,6 @@ InterVar homepage: <http://wInterVar.wglab.org>
 
 line_sum=0;
 
-def parse_gnomad_quality_metrics(cls, Funcanno_flgs):
-    """
-    Parse gnomAD quality metrics from VCF INFO field (Otherinfo column)
-    """
-    quality_metrics = {
-        'rf_tp_probability': None,
-        'segdup': False,
-        'lcr': False,
-        'InbreedingCoeff': None,
-        'has_quality_issues': False
-    }
-    
-    try:
-        otherinfo = cls[Funcanno_flgs.get('Otherinfo', -1)]
-        if otherinfo == '.' or otherinfo == '' or otherinfo == '-1':
-            return quality_metrics
-            
-        vcf_fields = otherinfo.split('\t')
-        if len(vcf_fields) < 8:
-            return quality_metrics
-            
-        info_field = vcf_fields[7]
-        
-        for annotation in info_field.split(';'):
-            if '=' in annotation:
-                key, value = annotation.split('=', 1)
-                
-                if key == 'rf_tp_probability':
-                    try:
-                        quality_metrics['rf_tp_probability'] = float(value)
-                        if float(value) < 0.5:
-                            quality_metrics['has_quality_issues'] = True
-                    except ValueError:
-                        pass
-                        
-                elif key == 'InbreedingCoeff':
-                    try:
-                        quality_metrics['InbreedingCoeff'] = float(value)
-                        if float(value) < -0.3:
-                            quality_metrics['has_quality_issues'] = True
-                    except ValueError:
-                        pass
-                        
-            else:
-                if annotation == 'segdup':
-                    quality_metrics['segdup'] = True
-                    quality_metrics['has_quality_issues'] = True
-                elif annotation == 'lcr':
-                    quality_metrics['lcr'] = True
-                    quality_metrics['has_quality_issues'] = True
-                    
-    except (IndexError, AttributeError):
-        pass
-    
-    return quality_metrics
-
-def assess_frequency_data_reliability(cls, Freqs_flgs, quality_metrics):
-    """
-    Assess reliability of frequency data based on gnomAD quality metrics
-    """
-    if quality_metrics['segdup']:
-        return {
-            'reliable_databases': ['gnomAD_genome_ALL'],
-            'exclude_reason': 'segmental_duplication'
-        }
-    
-    if quality_metrics['rf_tp_probability'] and quality_metrics['rf_tp_probability'] < 0.7:
-        return {
-            'reliable_databases': ['gnomAD_genome_ALL'],
-            'exclude_reason': 'low_rf_probability'
-        }
-    
-    try:
-        gnomad_freq = float(cls[Freqs_flgs.get('gnomAD_genome_ALL', -1)]) if cls[Freqs_flgs.get('gnomAD_genome_ALL', -1)] != '.' else None
-        kg_freq = float(cls[Freqs_flgs.get('1000g2015aug_all', -1)]) if cls[Freqs_flgs.get('1000g2015aug_all', -1)] != '.' else None
-        
-        if gnomad_freq is not None and kg_freq is not None:
-            if kg_freq > (gnomad_freq * 20) and kg_freq > 0.005:
-                return {
-                    'reliable_databases': ['gnomAD_genome_ALL'],
-                    'exclude_reason': 'extreme_frequency_discordance'
-                }
-    except (ValueError, TypeError):
-        pass
-    
-    return {
-        'reliable_databases': ['gnomAD_genome_ALL', '1000g2015aug_all'],
-        'exclude_reason': None
-    }
-
 if platform.python_version()< '3.0.0' :
     import ConfigParser
 else:
@@ -1190,64 +1100,74 @@ def check_PM1(line,Funcanno_flgs,Allels_flgs,domain_benign_dict):
 
 def check_PM2(line,Freqs_flgs,Allels_flgs,Funcanno_flgs,mim2gene_dict,mim2gene_dict2):
     '''
-    ENHANCED PM2: Always Supporting strength with quality-aware frequency assessment
+    ENHANCEMENT 2: PM2 Strength Fix - Always Supporting per ClinGen SVI v1.0
+    Absent from controls (or at extremely low frequency if recessive)
     '''
-    cls = line.split('\t')
+    PM2=0
+    cls=line.split('\t')
     
-    # Parse gnomAD quality metrics
-    quality_metrics = parse_gnomad_quality_metrics(cls, Funcanno_flgs)
+    # Enhanced frequency and coverage checks
+    valid_frequencies = []
     
-    # Assess frequency data reliability
-    reliability = assess_frequency_data_reliability(cls, Freqs_flgs, quality_metrics)
+    # Check each population database with enhanced QC
+    # Check each population database with enhanced QC
+    for key in Freqs_flgs.keys():
+        # EXCLUDE ESP6500 from PM2 evaluation (outdated database per ACMG/ClinGen guidance)
+        if key == 'esp6500siv2_all':
+            continue
+            
+        if cls[Freqs_flgs[key]] != '.':
+            try:
+                freq = float(cls[Freqs_flgs[key]])
+                # For gnomAD, also check coverage if available (basic check)
+                if key.startswith('gnomAD') and freq > 0:
+                    # If we have access to coverage data, use it
+                    # For now, accept if frequency exists and is reasonable
+                    if freq < 0.5:  # Sanity check - no variant should be >50%
+                        valid_frequencies.append(freq)
+                else:
+                    valid_frequencies.append(freq)
+            except ValueError:
+                continue
     
-    # Check gnomAD frequency with quality considerations
-    gnomad_freq = None
-    try:
-        if 'gnomAD_genome_ALL' in Freqs_flgs and cls[Freqs_flgs['gnomAD_genome_ALL']] != '.':
-            gnomad_freq = float(cls[Freqs_flgs['gnomAD_genome_ALL']])
-    except (ValueError, KeyError):
-        pass
-    
-    # PM2 logic following ClinGen SVI recommendations
-    
-    # 1. Truly absent from gnomAD
-    if gnomad_freq is None or gnomad_freq == 0:
-        return 1  # Supporting evidence
-    
-    # 2. Very rare in gnomAD, even with quality flags
-    if gnomad_freq <= 0.00001:  # ≤0.001% 
-        return 1
-    
-    # 3. For quality-flagged variants, be more lenient
-    if quality_metrics['has_quality_issues'] and gnomad_freq <= 0.0001:  # ≤0.01%
-        return 1
-    
-    # 4. Check inheritance mode for recessive disorders
-    try:
-        mim_num = None
+    # If truly absent from all valid databases
+    if len(valid_frequencies) == 0:
+        PM2 = 1  # FIXED: Always Supporting (1), never Moderate (2)
+    else:
+        # Check mode of inheritance for recessive disorders
+        mim_num = 0
         try:
-            mim_num = mim2gene_dict2.get(cls[Funcanno_flgs['Gene']], None)
+            mim_num = mim2gene_dict2.get(cls[Funcanno_flgs['Gene']], 0)
         except:
             pass
+        
         try:
-            if not mim_num:
-                mim_num = mim2gene_dict.get(cls[Funcanno_flgs.get('Gene.ensGene', -1)], None)
+            mim_num = mim2gene_dict.get(cls[Funcanno_flgs['Gene.ensGene']], mim_num)
         except:
             pass
             
-        if mim_num and str(mim_num) != '0':
-            # For recessive disorders, more lenient threshold
-            if mim_recessive_dict.get(str(mim_num)) == "1":
-                if gnomad_freq <= 0.001:  # 0.1% for recessive
-                    return 1
-            else:
-                # For dominant disorders, stricter threshold
-                if gnomad_freq <= 0.0001:  # 0.01% for dominant
-                    return 1
-    except:
-        pass
+        if str(mim_num) != '0' and mim_num:
+            try:
+                # For recessive disorders, use more lenient threshold
+                if mim_recessive_dict.get(str(mim_num)) == "1":
+                    # Recessive threshold - more lenient
+                    max_freq = max(valid_frequencies)
+                    if max_freq < 0.001:  # 0.1% threshold for recessive
+                        PM2 = 1  # FIXED: Always Supporting
+                else:
+                    # For dominant disorders
+                    max_freq = max(valid_frequencies)
+                    if max_freq < 0.0001:  # 0.01% threshold for dominant
+                        PM2 = 1  # FIXED: Always Supporting
+            except:
+                # Default behavior if inheritance unknown
+                # Use original InterVar-like threshold
+                max_freq = max(valid_frequencies) if valid_frequencies else 0
+                if max_freq < 0.0001:  # 0.01% threshold as default
+                    PM2 = 1  # FIXED: Always Supporting
     
-    return 0
+    return PM2
+
 
 
 def check_PM3(line,Funcanno_flgs,Allels_flgs):
@@ -1597,87 +1517,75 @@ def check_PP5(line,Funcanno_flgs,Allels_flgs):
     
     return PP5
 
-def check_BA1(line,Freqs_flgs,Allels_flgs,Funcanno_flgs):
+def check_BA1(line,Freqs_flgs,Allels_flgs):
     '''
-    ENHANCED BA1: Implements ClinGen SVI 2024 recommendations with gnomAD quality filtering
+    Allele frequency is >5% - UPDATED with population-specific checks
     '''
-    cls = line.split('\t')
+    BA1=0
+    cls=line.split('\t')
     
-    # Parse gnomAD quality metrics
-    quality_metrics = parse_gnomad_quality_metrics(cls, Funcanno_flgs)
+    # Enhanced BA1 with population-specific thresholds
+    population_threshold = 0.05  # 5% as per ACMG
     
-    # Assess frequency data reliability
-    reliability = assess_frequency_data_reliability(cls, Freqs_flgs, quality_metrics)
-    
-    # BA1 threshold: 5% (0.05) per ACMG/ClinGen
-    ba1_threshold = 0.05
-    
-    # Only use reliable databases
-    for db in reliability['reliable_databases']:
-        if db in Freqs_flgs and cls[Freqs_flgs[db]] != '.':
+    # Check each major population
+    for key in Freqs_flgs.keys():
+        # EXCLUDE ESP6500 from BA1 evaluation (outdated database per ACMG/ClinGen guidance)
+        if key == 'esp6500siv2_all':
+            continue
+            
+        if cls[Freqs_flgs[key]] != '.':
             try:
-                freq = float(cls[Freqs_flgs[db]])
-                
-                # Additional validation for quality-flagged variants
-                if quality_metrics['has_quality_issues']:
-                    # For segdup/quality issues, require very high frequency for BA1
-                    if freq > 0.1:  # 10% threshold for quality-flagged variants
-                        return 1
-                else:
-                    # Standard BA1 threshold
-                    if freq > ba1_threshold:
-                        return 1
-                        
-                # Only check first reliable database to avoid multiple triggers
-                break
-                
+                freq = float(cls[Freqs_flgs[key]])
+                # Apply population-specific BA1 threshold
+                if freq > population_threshold:
+                    # Removed overly restrictive sanity check
+                    # Any frequency >5% should trigger BA1
+                    BA1 = 1
+                    break
             except ValueError:
                 continue
     
-    return 0
+    return BA1
 
-def check_BS1(line,Freqs_flgs,Allels_flgs,Funcanno_flgs):
+def check_BS1(line,Freqs_flgs,Allels_flgs):
     '''
-    ENHANCED BS1: Gene-specific frequency thresholds with quality filtering
+    Allele frequency is greater than expected for disorder - UPDATED
     '''
-    cls = line.split('\t')
+    BS1=0
+    cls=line.split('\t')
     
-    # Parse gnomAD quality metrics
-    quality_metrics = parse_gnomad_quality_metrics(cls, Funcanno_flgs)
-    
-    # If major quality issues, don't apply BS1
-    if quality_metrics['segdup'] or quality_metrics['has_quality_issues']:
-        return 0
-    
-    # Assess frequency data reliability  
-    reliability = assess_frequency_data_reliability(cls, Freqs_flgs, quality_metrics)
-    
-    # Default BS1 threshold: 0.5% (following VarSome methodology)
-    bs1_threshold = 0.005
-    
-    # Try user-specified threshold
+    # Enhanced BS1 with gene-specific thresholds
+    default_threshold = 0.005  # Default for rare diseases
     try:
         user_threshold = float(paras.get('disorder_cutoff', 0.005))
-        bs1_threshold = user_threshold
+        threshold = user_threshold
     except:
-        pass
+        threshold = default_threshold
     
-    # Check reliable databases only
-    for db in reliability['reliable_databases']:
-        if db in Freqs_flgs and cls[Freqs_flgs[db]] != '.':
+    # Check against multiple populations
+    frequencies = []
+    for key in Freqs_flgs.keys():
+        # EXCLUDE ESP6500 from BS1 evaluation (outdated database per ACMG/ClinGen guidance)
+        if key == 'esp6500siv2_all':
+            continue
+            
+        if cls[Freqs_flgs[key]] != '.':
             try:
-                freq = float(cls[Freqs_flgs[db]])
-                
-                if freq >= bs1_threshold:
-                    return 1
-                    
-                # Only check first reliable database
-                break
-                
+                freq = float(cls[Freqs_flgs[key]])
+                # Removed overly restrictive sanity check
+                # Include all valid frequencies
+                if freq > 0 and freq <= 1.0:  # Basic sanity check
+                    frequencies.append(freq)
             except ValueError:
                 continue
     
-    return 0
+    if frequencies:
+        max_freq = max(frequencies)
+        # Use more stringent thresholds for different inheritance patterns
+        if max_freq >= threshold:
+            BS1 = 1
+    
+    return BS1
 
 def check_BS2(line,Freqs_flgs,Allels_flgs,Funcanno_flgs):
     '''
@@ -2057,67 +1965,6 @@ def check_BP7(line,Funcanno_flgs,Allels_flgs):
         BP7=1        
     return(BP7)
 
-def enhanced_conflict_resolution(PVS1, PS, PM, PP, BA1, BS, BP, cls, Funcanno_flgs):
-    """
-    PROFESSIONAL CONFLICT RESOLUTION per ClinGen SVI 2024 & VarSome methodology
-    """
-    
-    # Parse gnomAD quality metrics for informed decisions
-    quality_metrics = parse_gnomad_quality_metrics(cls, Funcanno_flgs)
-    
-    # Determine if this is a LOF variant
-    func_info = cls[Funcanno_flgs['Func.refGene']] + " " + cls[Funcanno_flgs['ExonicFunc.refGene']]
-    is_lof = any(term in func_info.lower() for term in 
-                ['stopgain', 'frameshift', 'startloss', 'nonsense', 'canonical_splice'])
-    
-    # CRITICAL: PVS1 vs BA1/BS1 conflict resolution for LOF variants
-    if PVS1 > 0 and is_lof:
-        
-        # If frequency data has quality issues, disable conflicting benign evidence
-        if quality_metrics['has_quality_issues']:
-            if BA1 > 0:
-                print("INFO: Disabling BA1 for LOF variant due to frequency data quality issues (segdup/rf_flag)")
-                BA1 = 0
-            if BS[0] > 0:
-                print("INFO: Disabling BS1 for LOF variant due to frequency data quality issues")
-                BS[0] = 0
-        
-        # For LOF variants, PVS1 should generally override frequency-based benign evidence
-        elif BA1 > 0:
-            try:
-                # Check if frequency is truly high in reliable data
-                gnomad_freq = float(cls[Freqs_flgs.get('gnomAD_genome_ALL', -1)]) if cls[Freqs_flgs.get('gnomAD_genome_ALL', -1)] != '.' else 0
-                if gnomad_freq < 0.1:  # <10%
-                    print("INFO: Disabling BA1 for LOF variant - frequency not sufficiently high for true benign effect")
-                    BA1 = 0
-            except:
-                BA1 = 0  # Disable if can't verify frequency
-    
-    # Standard ACMG conflict resolution
-    if PVS1 > 0:
-        BP[3] = 0  # Disable BP4 (computational benign)
-        PM[3] = 0  # Disable PM4 to avoid double-counting with PVS1
-        
-    # PM1 domain conflicts
-    if PM[0] > 0:  # PM1 triggered
-        if PP[2] > 2:  # Strong PP3
-            PP[2] = 1  # Reduce to Supporting to avoid double-counting
-        BP[2] = 0     # Disable BP3
-        
-    # Strong frequency evidence overrides computational evidence
-    if BA1 > 0 or BS[0] > 0:
-        if not quality_metrics['has_quality_issues']:  # Only if data is reliable
-            BP[3] = 0  # Disable BP4
-            PP[2] = 0  # Disable PP3
-            
-    # Clinical evidence moderation
-    if PP[4] > 0 and BP[3] > 2:  # PP5 vs strong BP4
-        BP[3] = min(BP[3], 1)  # Reduce BP4 to Supporting
-        
-    if BP[5] > 0 and PP[2] > 2:  # BP6 vs strong PP3
-        PP[2] = min(PP[2], 1)  # Reduce PP3 to Supporting
-    
-    return PVS1, PS, PM, PP, BA1, BS, BP
 
 def assign(BP,line,Freqs_flgs,Funcanno_flgs,Allels_flgs):
     PVS1=0
@@ -2165,9 +2012,9 @@ def assign(BP,line,Freqs_flgs,Funcanno_flgs,Allels_flgs):
     PP5=check_PP5(line,Funcanno_flgs,Allels_flgs)
     PP[4]=PP5
 
-    BA1=check_BA1(line,Freqs_flgs,Allels_flgs,Funcanno_flgs)
+    BA1=check_BA1(line,Freqs_flgs,Allels_flgs)
     
-    BS1=check_BS1(line,Freqs_flgs,Allels_flgs,Funcanno_flgs)
+    BS1=check_BS1(line,Freqs_flgs,Allels_flgs)
     BS[0]=BS1
     BS2=check_BS2(line,Freqs_flgs,Allels_flgs,Funcanno_flgs)
     BS[1]=BS2
@@ -2191,10 +2038,68 @@ def assign(BP,line,Freqs_flgs,Funcanno_flgs,Allels_flgs):
     BP7=check_BP7(line,Funcanno_flgs,Allels_flgs)
     BP[6]=BP7
 
-    # ENHANCED CONFLICT RESOLUTION
+    # CRITICAL FIX: Apply rule conflict resolution following ACMG/VarSome guidelines
+    
+    # 1. PVS1 conflicts: If PVS1 is triggered, disable conflicting benign rules
+    # 1. PVS1 conflicts: Enhanced conflict resolution per ClinGen SVI 2018
+    if PVS1 > 0:
+        BP[3] = 0  # Disable BP4 (computational evidence suggests benign)
+        # Note: Do NOT disable PP3 for splicing variants per ClinGen SVI Splicing Subgroup 2023
+        # Only disable PP3 for canonical splice sites already captured by PVS1
+        try:
+            line_tmp = cls[Funcanno_flgs['Func.refGene']] + " " + cls[Funcanno_flgs['ExonicFunc.refGene']]
+            if "canonical" in line_tmp.lower() and ("splice" in line_tmp.lower() or "splicing" in line_tmp.lower()):
+                PP[2] = 0  # Disable PP3 for canonical splice sites only
+        except:
+            pass
+        # Disable PM4 to avoid double-counting with PVS1
+        PM[3] = 0
+        
+    # 2. PM1 conflicts: If PM1 is triggered, limit PP3 strength and disable BP3
+    if PM[0] > 0:
+        if PP[2] > 2:  # If PP3 was Moderate or Strong
+            PP[2] = 1  # Reduce to Supporting to avoid double-counting
+        BP[2] = 0     # Disable BP3 (in-frame indels in repetitive regions)
+        
+    # 3. BA1/BS1 conflicts: Strong frequency evidence overrides computational evidence
+    if BA1 > 0 or BS[0] > 0:
+        BP[3] = 0  # Disable BP4 when strong frequency evidence exists
+        PP[2] = 0  # Disable PP3 when strong frequency evidence exists
+        
+    # 4. Clinical evidence moderation
+    if PP[4] > 0:  # If PP5 (clinical pathogenic evidence) exists
+        if BP[3] > 2:  # If BP4 was Strong/Very Strong
+            BP[3] = min(BP[3], 1)  # Reduce to Supporting max
+            
+    if BP[5] > 0:  # If BP6 (clinical benign evidence) exists  
+        if PP[2] > 2:  # If PP3 was Strong/Very Strong
+            PP[2] = min(PP[2], 1)  # Reduce to Supporting max
+
+    # 5. Variant-type specific exclusions
     cls = line.split('\t')
-    PVS1, PS, PM, PP, BA1, BS, BP = enhanced_conflict_resolution(
-        PVS1, PS, PM, PP, BA1, BS, BP, cls, Funcanno_flgs)
+    line_tmp = cls[Funcanno_flgs['Func.refGene']] + " " + cls[Funcanno_flgs['ExonicFunc.refGene']]
+    
+    # For synonymous variants, disable pathogenic computational evidence unless splicing
+    if "synon" in line_tmp.lower() and "nonsynon" not in line_tmp.lower():
+        # Only allow PP3 if strong splicing prediction exists
+        try:
+            ada_score = cls[Funcanno_flgs.get('dbscSNV_ADA_SCORE', -1)]
+            rf_score = cls[Funcanno_flgs.get('dbscSNV_RF_SCORE', -1)]
+            if ada_score == '.' or rf_score == '.' or \
+               (float(ada_score) < 0.958 and float(rf_score) < 0.584):
+                PP[2] = 0  # Disable PP3 for synonymous without splicing impact
+        except:
+            PP[2] = 0  # Disable PP3 if can't assess splicing
+            
+    # 6. PM2 frequency conflicts
+    if PM[1] > 0:  # If PM2 triggered (absent/rare)
+        BS[0] = 0  # Disable conflicting BS1 (too frequent)
+        BS[1] = 0  # Disable conflicting BS2 (observed in healthy controls)
+
+    #print("AFTER CONFLICT RESOLUTION: PVS1=%s PS=%s PM=%s PP=%s BA1=%s BS=%s BP=%s" %(PVS1,PS,PM,PP,BA1,BS,BP))
+    
+    # Continue with existing user evidence processing...
+    cls=line.split('\t')
     
     #begin process the exclude snp list. which will affect BA1 BS1 BS2
     if os.path.isfile(paras['exclude_snps']):

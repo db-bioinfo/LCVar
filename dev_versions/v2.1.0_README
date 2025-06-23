@@ -1,0 +1,8 @@
+Key improvements:
+
+ClinGen-calibrated thresholds from VarSome's methodology for all predictors
+Evidence strength scaling (Supporting=1, Moderate=2, Strong=4, Very Strong=8)
+Meta-predictor hierarchy to prevent double-counting
+Proper LOF exclusion to avoid conflicts with PVS1
+Conservation metrics as fallback evidence
+Splicing predictions with appropriate thresholds

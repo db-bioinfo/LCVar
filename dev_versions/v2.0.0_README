@@ -1,0 +1,10 @@
+1. PVS1 - Loss of Function (Highest Priority)
+
+Current: Basic LOF detection with SnpEff integration
+Need: Full ClinGen SVI 2018 decision tree implementation including:
+
+NMD prediction beyond simple annotation parsing
+Exon position analysis (last exon, last 50bp rules)
+Alternative start codon rescue assessment
+Biologically relevant transcript selection
+Strength modulation (PVS1_Strong, PVS1_Moderate, PVS1_Supporting)
